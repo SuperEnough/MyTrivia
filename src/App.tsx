@@ -430,7 +430,7 @@ export default function App() {
                 <em>OR DO I?</em>
               </div>
 
-              <p className="intro-kicker">WOULD YOU RATHER / HOW WELL DO YOU KNOW ME?</p>
+              <p className="intro-kicker">WOULD I RATHER / HOW WELL DO YOU KNOW ME?</p>
               <h1>
                 Read the vibe.<br />
                 <strong>Lock it in.</strong>
