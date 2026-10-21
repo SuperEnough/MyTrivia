@@ -4,14 +4,112 @@
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Screen, Theme, BoardEntry, Choice } from './types';
-import { questions, blitzQuestions } from './data';
+import { Screen, Theme, BoardEntry, Choice, Question, DeviceAttempt } from './types';
+import { questions as defaultQuestions, blitzQuestions } from './data';
 import { sound } from './audio';
 import { AtmosphereCanvas } from './components/AtmosphereCanvas';
 import { LeaderboardView } from './components/LeaderboardView';
-import { Volume2, VolumeX, Share2, Check, AlertCircle, ArrowUpRight } from 'lucide-react';
+import { Volume2, VolumeX, Share2, Check, AlertCircle, ArrowUpRight, Lock, Trash2 } from 'lucide-react';
 
-const LOCAL_STORAGE_KEY = 'how-well-do-you-know-me.leaderboard.v3';
+const LOCAL_STORAGE_KEY = 'how-well-do-you-know-me.leaderboard.v6';
+const DEVICE_ID_KEY = 'how-well-do-you-know-me.device-id.v5';
+const DEVICE_ATTEMPT_KEY = 'how-well-do-you-know-me.device-attempt.v5';
+
+function shuffleChoices(qList: Question[]): Question[] {
+  return qList.map(q => {
+    const shuffled = [...q.choices];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    return { ...q, choices: shuffled };
+  });
+}
+
+function getCookie(name: string): string | null {
+  try {
+    const match = document.cookie.match(new RegExp('(^|;\\s*)(' + name + ')=([^;]*)'));
+    return match ? decodeURIComponent(match[3]) : null;
+  } catch {
+    return null;
+  }
+}
+
+function setCookie(name: string, value: string) {
+  try {
+    document.cookie = `${name}=${encodeURIComponent(value)}; path=/; max-age=31536000; SameSite=Lax`;
+  } catch {
+    // ignore
+  }
+}
+
+function removeCookie(name: string) {
+  try {
+    document.cookie = `${name}=; path=/; max-age=0; SameSite=Lax`;
+  } catch {
+    // ignore
+  }
+}
+
+function getDeviceFingerprint(): string {
+  try {
+    const screenPart = `${window.screen.width}x${window.screen.height}x${window.screen.colorDepth}`;
+    const navPart = `${navigator.language}_${navigator.hardwareConcurrency || 0}_${navigator.maxTouchPoints || 0}`;
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+    const platform = (navigator as any).userAgentData?.platform || navigator.platform || '';
+    return `fp_${btoa(`${screenPart}|${navPart}|${tz}|${platform}`).replace(/[^a-zA-Z0-9]/g, '').slice(0, 24)}`;
+  } catch {
+    return 'fp_generic';
+  }
+}
+
+function getOrCreateDeviceId(): string {
+  let id = '';
+  try {
+    id = localStorage.getItem(DEVICE_ID_KEY) || sessionStorage.getItem(DEVICE_ID_KEY) || getCookie(DEVICE_ID_KEY) || '';
+    if (!id) {
+      id = 'dev_' + Math.random().toString(36).substring(2, 10) + '_' + Date.now().toString(36);
+    }
+    // Sync across all 3 storage mechanisms
+    localStorage.setItem(DEVICE_ID_KEY, id);
+    sessionStorage.setItem(DEVICE_ID_KEY, id);
+    setCookie(DEVICE_ID_KEY, id);
+  } catch {
+    id = 'dev_fallback_' + Date.now();
+  }
+  return id;
+}
+
+function getLocalDeviceAttempt(): DeviceAttempt | null {
+  try {
+    const raw = localStorage.getItem(DEVICE_ATTEMPT_KEY) || sessionStorage.getItem(DEVICE_ATTEMPT_KEY) || getCookie(DEVICE_ATTEMPT_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function saveLocalDeviceAttempt(attempt: DeviceAttempt) {
+  try {
+    const serialized = JSON.stringify(attempt);
+    localStorage.setItem(DEVICE_ATTEMPT_KEY, serialized);
+    sessionStorage.setItem(DEVICE_ATTEMPT_KEY, serialized);
+    setCookie(DEVICE_ATTEMPT_KEY, serialized);
+  } catch {
+    // ignore
+  }
+}
+
+function clearLocalDeviceAttempt() {
+  try {
+    localStorage.removeItem(DEVICE_ATTEMPT_KEY);
+    sessionStorage.removeItem(DEVICE_ATTEMPT_KEY);
+    removeCookie(DEVICE_ATTEMPT_KEY);
+  } catch {
+    // ignore
+  }
+}
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>('intro');
@@ -22,13 +120,22 @@ export default function App() {
   const [mainScore, setMainScore] = useState<number>(0);
   const [mainCorrectCount, setMainCorrectCount] = useState<number>(0);
 
+  // Scrambled questions for the current session
+  const [activeQuestions, setActiveQuestions] = useState<Question[]>(() => shuffleChoices(defaultQuestions));
+
   // Blitz state
+  const [activeBlitzQuestions, setActiveBlitzQuestions] = useState<Question[]>(() => shuffleChoices(blitzQuestions));
   const [blitzSelections, setBlitzSelections] = useState<[string | null, string | null]>([null, null]);
   const [blitzRemaining, setBlitzRemaining] = useState<number>(30);
   const [blitzDeadline, setBlitzDeadline] = useState<number>(0);
   const [blitzScore, setBlitzScore] = useState<number>(0);
   const [timeBonus, setTimeBonus] = useState<number>(0);
   const [finalScore, setFinalScore] = useState<number>(0);
+
+  // Device Lock & Integrity state
+  const [deviceId] = useState<string>(() => getOrCreateDeviceId());
+  const [fingerprint] = useState<string>(() => getDeviceFingerprint());
+  const [deviceAttempt, setDeviceAttempt] = useState<DeviceAttempt | null>(() => getLocalDeviceAttempt());
 
   // Leaderboard state
   const [entries, setEntries] = useState<BoardEntry[]>(() => {
@@ -51,23 +158,64 @@ export default function App() {
   const blitzTimerRef = useRef<number | null>(null);
   const nameInputRef = useRef<HTMLInputElement | null>(null);
 
+  // Clear legacy mock boards on startup and verify device state with server
+  useEffect(() => {
+    try {
+      for (let i = 1; i <= 5; i++) {
+        localStorage.removeItem(`how-well-do-you-know-me.leaderboard.v${i}`);
+        localStorage.removeItem(`how-well-do-you-know-me.device-id.v${i}`);
+        localStorage.removeItem(`how-well-do-you-know-me.device-attempt.v${i}`);
+      }
+    } catch {
+      // ignore
+    }
+
+    // Check if server already has a record for this deviceId or browser fingerprint
+    if (deviceId) {
+      fetch(`/api/leaderboard/check?deviceId=${encodeURIComponent(deviceId)}&fingerprint=${encodeURIComponent(fingerprint)}`)
+        .then(res => res.json())
+        .then(data => {
+          if (data.deviceLocked && data.deviceEntry) {
+            const serverAttempt: DeviceAttempt = {
+              name: data.deviceEntry.name,
+              score: data.deviceEntry.score,
+              mainScore: data.deviceEntry.mainScore,
+              blitzScore: data.deviceEntry.blitzScore,
+              timeBonus: data.deviceEntry.timeBonus,
+              entryId: data.deviceEntry.id,
+              timestamp: data.deviceEntry.createdAt || Date.now(),
+            };
+            setDeviceAttempt(serverAttempt);
+            saveLocalDeviceAttempt(serverAttempt);
+          } else if (!data.deviceLocked) {
+            // Server board is empty or has no record for this device - ensure local attempt is synchronized
+            setDeviceAttempt(null);
+            clearLocalDeviceAttempt();
+          }
+        })
+        .catch(() => {
+          // ignore
+        });
+    }
+  }, [deviceId, fingerprint]);
+
   // Update theme on body
   useEffect(() => {
     let currentTheme: Theme = 'intro' as any;
     if (screen === 'quiz') {
-      currentTheme = questions[questionIndex]?.theme || 'car';
+      currentTheme = activeQuestions[questionIndex]?.theme || 'car';
     } else if (screen === 'blitz' || screen === 'blitz-intro') {
       currentTheme = 'blitz';
     }
     document.body.dataset.theme = currentTheme;
-  }, [screen, questionIndex]);
+  }, [screen, questionIndex, activeQuestions]);
 
-  // Focus name input on intro screen
+  // Focus name input on intro screen if not locked
   useEffect(() => {
-    if (screen === 'intro') {
+    if (screen === 'intro' && !deviceAttempt) {
       nameInputRef.current?.focus();
     }
-  }, [screen]);
+  }, [screen, deviceAttempt]);
 
   // Sync leaderboard with backend REST & SSE stream
   useEffect(() => {
@@ -114,6 +262,16 @@ export default function App() {
               showToast(`⚡ Live Update: ${payload.entry.name} scored ${payload.entry.score} pts!`);
               setTimeout(() => setRecentEntryId(null), 3000);
             }
+          } else if (payload.type === 'clear') {
+            setEntries([]);
+            setDeviceAttempt(null);
+            clearLocalDeviceAttempt();
+            try {
+              localStorage.removeItem(LOCAL_STORAGE_KEY);
+            } catch {
+              // ignore
+            }
+            showToast('Leaderboard and contest standings were reset.');
           }
         } catch {
           // ignore parse errors
@@ -148,9 +306,17 @@ export default function App() {
     setSoundOn(next);
   };
 
-  // Start game flow
+  // Start game flow with strict single attempt enforcement
   const handleStartGame = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+
+    // 1. Device Lock check
+    if (deviceAttempt) {
+      setNotice(`This device has already logged its single attempt as ${deviceAttempt.name} (${deviceAttempt.score} pts).`);
+      sound.playWrong();
+      return;
+    }
+
     const cleaned = playerName.trim().replace(/\s+/g, ' ').slice(0, 18);
     if (!cleaned) {
       setNotice('Drop a name first. The leaderboard needs a legend.');
@@ -158,28 +324,43 @@ export default function App() {
       return;
     }
 
-    // Check locally first
-    const alreadyPlayedLocal = entries.some(entry => entry.name.toLowerCase() === cleaned.toLowerCase());
-    if (alreadyPlayedLocal) {
-      setNotice(`${cleaned} has already used their one chance. Try a different player name.`);
+    if (cleaned.length < 2) {
+      setNotice('Player name must be at least 2 characters.');
       sound.playWrong();
       return;
     }
 
-    // Check server
+    // 2. Name check locally first against current loaded standings
+    const alreadyPlayedLocal = entries.some(entry => entry.name.toLowerCase() === cleaned.toLowerCase());
+    if (alreadyPlayedLocal) {
+      setNotice(`${cleaned} has already used their one attempt. Try a different player name.`);
+      sound.playWrong();
+      return;
+    }
+
+    // 3. Double check device + name with server before allowing the quiz to start
     try {
-      const res = await fetch(`/api/leaderboard/check?name=${encodeURIComponent(cleaned)}`);
+      const res = await fetch(`/api/leaderboard/check?deviceId=${encodeURIComponent(deviceId)}&fingerprint=${encodeURIComponent(fingerprint)}&name=${encodeURIComponent(cleaned)}`);
       if (res.ok) {
         const checkData = await res.json();
-        if (checkData.taken) {
+        if (checkData.deviceLocked) {
+          setNotice('This device has already completed its single attempt. Each device is limited to 1 run.');
+          sound.playWrong();
+          return;
+        }
+        if (checkData.nameTaken || checkData.taken) {
           setNotice(`${cleaned} has already used their one chance. Try a different player name.`);
           sound.playWrong();
           return;
         }
       }
     } catch {
-      // Continue if server check has network glitch
+      // Continue if server check has temporary network glitch
     }
+
+    // Scramble both main questions choices and blitz choices so no two runs are identical
+    setActiveQuestions(shuffleChoices(defaultQuestions));
+    setActiveBlitzQuestions(shuffleChoices(blitzQuestions));
 
     sound.playSelect();
     setPlayerName(cleaned);
@@ -201,13 +382,13 @@ export default function App() {
   // Choose main question choice
   const handleChooseMain = (id: string) => {
     if (screen !== 'quiz' || mainAnswered) return;
-    const currentQ = questions[questionIndex];
-    const isCorrect = id === currentQ.correct;
+    const currentQ = activeQuestions[questionIndex];
+    const isAnswerCorrect = id === currentQ.correct;
 
     setSelectedMain(id);
     setMainAnswered(true);
 
-    if (isCorrect) {
+    if (isAnswerCorrect) {
       setMainScore(prev => prev + 100);
       setMainCorrectCount(prev => prev + 1);
       sound.playCorrect();
@@ -220,7 +401,7 @@ export default function App() {
   const handleNextMain = () => {
     if (!mainAnswered) return;
     sound.playSelect();
-    if (questionIndex === questions.length - 1) {
+    if (questionIndex === activeQuestions.length - 1) {
       setScreen('blitz-intro');
     } else {
       setQuestionIndex(prev => prev + 1);
@@ -229,10 +410,11 @@ export default function App() {
     }
   };
 
-  // Start Blitz
+  // Start Blitz with scrambled options & zero exposed answers
   const handleStartBlitz = () => {
     sound.playSelect();
     if (blitzTimerRef.current) clearInterval(blitzTimerRef.current);
+    setActiveBlitzQuestions(shuffleChoices(blitzQuestions));
     setBlitzSelections([null, null]);
     setBlitzRemaining(30);
     const deadline = Date.now() + 30000;
@@ -261,7 +443,7 @@ export default function App() {
     });
   };
 
-  // Finish Blitz and save to Leaderboard
+  // Finish Blitz and permanently lock device attempt
   const handleFinishBlitz = useCallback((forcedRemaining?: number) => {
     if (blitzTimerRef.current) {
       clearInterval(blitzTimerRef.current);
@@ -275,9 +457,13 @@ export default function App() {
 
     setBlitzRemaining(currentRemaining);
 
-    // Scoring math
-    const dayPoints = blitzSelections[0] === '304' ? 150 : blitzSelections[0] === '305' ? 50 : 0;
-    const leftPoints = blitzSelections[1] === '61' ? 150 : 0;
+    // Dynamic scoring based on actual correct answers
+    const q0 = activeBlitzQuestions[0];
+    const q1 = activeBlitzQuestions[1];
+    const q0Correct = blitzSelections[0] === q0?.correct;
+    const q1Correct = blitzSelections[1] === q1?.correct;
+    const dayPoints = q0Correct ? 150 : (blitzSelections[0] === '305' && q0?.correct === '304' ? 50 : 0);
+    const leftPoints = q1Correct ? 150 : 0;
     const bonus = currentRemaining * 10;
     const totalBlitz = dayPoints + leftPoints + bonus;
     const totalFinal = mainScore + totalBlitz;
@@ -289,9 +475,22 @@ export default function App() {
 
     sound.playFanfare();
 
-    // Post to Server Sync
+    // Lock device attempt locally across localStorage, sessionStorage, and cookie
     const newEntryId = Date.now();
     setLastEntryId(newEntryId);
+
+    const attemptRecord: DeviceAttempt = {
+      name: playerName || 'Anonymous',
+      score: totalFinal,
+      mainScore: mainScore,
+      blitzScore: totalBlitz,
+      timeBonus: bonus,
+      entryId: newEntryId,
+      timestamp: Date.now(),
+    };
+
+    saveLocalDeviceAttempt(attemptRecord);
+    setDeviceAttempt(attemptRecord);
 
     const entryPayload: BoardEntry = {
       id: newEntryId,
@@ -301,6 +500,8 @@ export default function App() {
       blitzScore: totalBlitz,
       timeBonus: bonus,
       createdAt: Date.now(),
+      deviceId: deviceId,
+      fingerprint: fingerprint,
     };
 
     // Save to local cache first
@@ -316,24 +517,56 @@ export default function App() {
       return updated;
     });
 
-    // Send to backend
+    // Send to backend with deviceId and browser fingerprint
     fetch('/api/leaderboard', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(entryPayload),
     })
-      .then(res => res.json())
-      .then(data => {
+      .then(async res => {
+        const data = await res.json();
+        if (!res.ok) {
+          showToast(`⚠️ ${data.error || 'Submission rejected by server'}`);
+          sound.playWrong();
+          return;
+        }
         if (data.entries && Array.isArray(data.entries)) {
           setEntries(data.entries);
         }
+        showToast('Official attempt locked and verified on global standings!');
       })
       .catch(() => {
         // Offline resilience handles local storage
       });
-  }, [blitzDeadline, blitzSelections, mainScore, playerName]);
+  }, [blitzDeadline, blitzSelections, mainScore, playerName, deviceId, fingerprint, activeBlitzQuestions]);
 
-  // Return home / restart
+  // Reset contest standings (Organizer / host utility)
+  const handleClearLeaderboard = async () => {
+    const confirmed = window.confirm(
+      'Reset all leaderboard standings and device attempts for a new contest round? This will clear the board for everyone.'
+    );
+    if (!confirmed) return;
+
+    try {
+      const res = await fetch('/api/leaderboard/clear', { method: 'POST' });
+      if (res.ok) {
+        setEntries([]);
+        setDeviceAttempt(null);
+        clearLocalDeviceAttempt();
+        try {
+          localStorage.removeItem(LOCAL_STORAGE_KEY);
+        } catch {
+          // ignore
+        }
+        showToast('Leaderboard cleared and contest attempts reset!');
+        sound.playSelect();
+      }
+    } catch {
+      showToast('Failed to clear leaderboard on server.');
+    }
+  };
+
+  // Return home / view standings
   const handleReturnHome = () => {
     sound.playSelect();
     if (blitzTimerRef.current) {
@@ -341,10 +574,6 @@ export default function App() {
       blitzTimerRef.current = null;
     }
     setScreen('intro');
-    setPlayerName('');
-    setQuestionIndex(0);
-    setSelectedMain(null);
-    setMainAnswered(false);
     setNotice('');
   };
 
@@ -353,8 +582,9 @@ export default function App() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (screen === 'quiz') {
         const num = Number(e.key);
-        if (!mainAnswered && num >= 1 && num <= questions[questionIndex].choices.length) {
-          handleChooseMain(questions[questionIndex].choices[num - 1].id);
+        const currentQChoices = activeQuestions[questionIndex]?.choices || [];
+        if (!mainAnswered && num >= 1 && num <= currentQChoices.length) {
+          handleChooseMain(currentQChoices[num - 1].id);
         } else if (mainAnswered && e.key === 'Enter') {
           handleNextMain();
         }
@@ -369,11 +599,12 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [screen, questionIndex, mainAnswered, blitzSelections, handleFinishBlitz]);
+  }, [screen, questionIndex, mainAnswered, blitzSelections, handleFinishBlitz, activeQuestions]);
 
   // Rank calculation
   const getRank = (): number => {
-    const idx = entries.findIndex(e => e.id === lastEntryId);
+    const targetId = lastEntryId || (deviceAttempt ? deviceAttempt.entryId : null);
+    const idx = entries.findIndex(e => e.id === targetId);
     return idx >= 0 ? idx + 1 : entries.length + 1;
   };
 
@@ -388,7 +619,7 @@ export default function App() {
     }
   };
 
-  const currentQ = questions[questionIndex];
+  const currentQ = activeQuestions[questionIndex];
   const isCorrect = selectedMain === currentQ?.correct;
 
   return (
@@ -407,7 +638,7 @@ export default function App() {
         <main className="screen-shell intro-shell">
           <div className="broadcast-line">
             <span className="live-dot" />
-            <span>ONE CHANCE / R100 PRIZE</span>
+            <span>ONE ATTEMPT PER PLAYER & DEVICE</span>
             <span className="broadcast-rule" />
             <span>5 PICKS + 1 CHAOS ROUND</span>
 
@@ -436,38 +667,71 @@ export default function App() {
                 <strong>Lock it in.</strong>
               </h1>
               <p className="intro-description">
-                Five personal picks. Immediate reveals. Then a 30-second Halloween blitz where the calendar fights back.
-                Everyone gets one chance; the highest score wins R100.
+                Five personal picks with scrambled choices. Then a 30-second Halloween tiebreaker blitz where the calendar fights back.
+                Strictly one attempt per player and device. Highest score wins the R100 prize!
               </p>
 
-              <form onSubmit={handleStartGame} className="name-form">
-                <label htmlFor="player-name">PLAYER NAME / ONE CHANCE ONLY</label>
-                <div className="name-row">
-                  <input
-                    id="player-name"
-                    ref={nameInputRef}
-                    maxLength={18}
-                    autoComplete="off"
-                    placeholder="Type your name"
-                    value={playerName}
-                    onChange={(e) => setPlayerName(e.target.value)}
-                  />
-                  <button className="primary-btn" type="submit">
-                    START QUIZ <ArrowUpRight size={18} />
+              {/* Strict Device & Player Name Lock */}
+              {deviceAttempt ? (
+                <div className="bg-[rgba(16,18,42,0.92)] border border-amber-500/50 p-5 max-w-[590px] shadow-lg shadow-amber-500/10 mb-4">
+                  <div className="flex items-center gap-2 text-amber-400 text-xs font-bold tracking-widest uppercase mb-2">
+                    <Lock size={15} />
+                    <span>Single Attempt Used on This Device</span>
+                  </div>
+                  <p className="text-sm text-[var(--cream)] mb-1">
+                    You have already logged your competitive run as <strong>{deviceAttempt.name}</strong> with a final score of{' '}
+                    <strong className="text-[var(--accent)] font-mono text-base">{deviceAttempt.score} pts</strong>.
+                  </p>
+                  <p className="text-xs text-[var(--muted)] mb-4">
+                    To maintain fair competition for the R100 bounty, only one run is permitted per player and device.
+                  </p>
+                  <button
+                    type="button"
+                    className="primary-btn"
+                    onClick={() => {
+                      sound.playSelect();
+                      setPlayerName(deviceAttempt.name);
+                      setFinalScore(deviceAttempt.score);
+                      setMainScore(deviceAttempt.mainScore);
+                      setBlitzScore(deviceAttempt.blitzScore);
+                      setTimeBonus(deviceAttempt.timeBonus);
+                      setLastEntryId(deviceAttempt.entryId);
+                      setScreen('results');
+                    }}
+                  >
+                    VIEW MY SCORECARD & RANK <ArrowUpRight size={18} />
                   </button>
                 </div>
-                {notice && (
-                  <p className="form-notice">
-                    <AlertCircle size={14} />
-                    <span>{notice}</span>
-                  </p>
-                )}
-              </form>
+              ) : (
+                <form onSubmit={handleStartGame} className="name-form">
+                  <label htmlFor="player-name">PLAYER NAME / ONE ATTEMPT PER PLAYER & DEVICE</label>
+                  <div className="name-row">
+                    <input
+                      id="player-name"
+                      ref={nameInputRef}
+                      maxLength={18}
+                      autoComplete="off"
+                      placeholder="Type your unique name"
+                      value={playerName}
+                      onChange={(e) => setPlayerName(e.target.value)}
+                    />
+                    <button className="primary-btn" type="submit">
+                      START QUIZ <ArrowUpRight size={18} />
+                    </button>
+                  </div>
+                  {notice && (
+                    <p className="form-notice">
+                      <AlertCircle size={14} />
+                      <span>{notice}</span>
+                    </p>
+                  )}
+                </form>
+              )}
 
               <div className="rule-row">
                 <span>100 PTS / MAIN ANSWER</span>
                 <span>+ SPEED BONUS</span>
-                <span>ONE ATTEMPT PER NAME</span>
+                <span>ONE ATTEMPT PER DEVICE</span>
               </div>
 
               <div className="prize-callout">
@@ -520,12 +784,12 @@ export default function App() {
           <section className="intro-bottom">
             <div>
               <span className="bottom-label">THE BRIEF</span>
-              <p>One name. One run. Highest total score wins the R100 prize. Standings update live across all competitors.</p>
+              <p>One device. One name. One run. Highest total score wins the R100 prize. Standings update live across all competitors.</p>
             </div>
             <LeaderboardView
               label="CURRENT STANDINGS / R100 PRIZE"
               entries={entries}
-              lastEntryId={lastEntryId}
+              lastEntryId={lastEntryId || (deviceAttempt ? deviceAttempt.entryId : null)}
               liveStatus={liveStatus}
               recentEntryId={recentEntryId}
             />
@@ -543,7 +807,7 @@ export default function App() {
             <div className="progress-wrap">
               <span>MAIN GAME</span>
               <div className="progress-track">
-                <i style={{ width: `${((questionIndex + 1) / questions.length) * 100}%` }} />
+                <i style={{ width: `${((questionIndex + 1) / activeQuestions.length) * 100}%` }} />
               </div>
               <b className="tabular-nums">0{questionIndex + 1} / 05</b>
             </div>
@@ -611,7 +875,6 @@ export default function App() {
                             src={choice.src}
                             alt={choice.alt || choice.label}
                             onError={(e) => {
-                              // If image fails, show stylish fallback
                               const parent = (e.target as HTMLElement).parentElement;
                               if (parent) {
                                 parent.innerHTML = `<span class="symbol-visual">✦</span>`;
@@ -646,7 +909,7 @@ export default function App() {
                   </div>
 
                   <button type="button" className="next-btn" onClick={handleNextMain}>
-                    <span>{questionIndex === questions.length - 1 ? 'ENTER THE CHAOS ROUND' : 'NEXT QUESTION'}</span>
+                    <span>{questionIndex === activeQuestions.length - 1 ? 'ENTER THE CHAOS ROUND' : 'NEXT QUESTION'}</span>
                     <span>→</span>
                   </button>
                 </>
@@ -666,7 +929,7 @@ export default function App() {
         </main>
       )}
 
-      {/* Screen 3: BLITZ INTRO */}
+      {/* Screen 3: BLITZ INTRO (Answers Strictly Hidden) */}
       {screen === 'blitz-intro' && (
         <main className="screen-shell blitz-intro-shell">
           <div className="blitz-grid-lines" />
@@ -689,9 +952,9 @@ export default function App() {
             </p>
 
             <div className="blitz-rules">
-              <span>304th = +150</span>
-              <span>61 days = +150</span>
-              <span>EVERY SECOND = +10</span>
+              <span>CALENDAR PICKS = +150 EACH</span>
+              <span>SPEED BONUS = +10 / SEC</span>
+              <span>30 SEC TIMER</span>
             </div>
 
             <div className="prize-callout">
@@ -746,7 +1009,7 @@ export default function App() {
             </div>
 
             <div className="blitz-question-grid">
-              {blitzQuestions.map((q, qIndex) => {
+              {activeBlitzQuestions.map((q, qIndex) => {
                 const selected = blitzSelections[qIndex];
                 return (
                   <article key={q.eyebrow} className={`blitz-question-card ${selected ? 'has-selection' : ''}`}>
@@ -758,7 +1021,7 @@ export default function App() {
                     <p>{q.prompt}</p>
 
                     <div className="blitz-options">
-                      {q.choices.map((choice, cIndex) => {
+                      {q.choices.map((choice: Choice, cIndex: number) => {
                         const isSelected = selected === choice.id;
                         return (
                           <button
@@ -802,7 +1065,7 @@ export default function App() {
             <div className="mini-brand">
               <span className="live-dot" /> TRANSMISSION COMPLETE
             </div>
-            <div className="result-tag">FINAL SCORECARD / ONE CHANCE USED</div>
+            <div className="result-tag">FINAL SCORECARD / ONE ATTEMPT USED</div>
             <div className="score-ticker">
               <span>RANKING</span>
               <b className="tabular-nums">#{getRank()}</b>
@@ -823,7 +1086,7 @@ export default function App() {
               </div>
 
               <h1>
-                {playerName || 'PLAYER'},<br />
+                {playerName || (deviceAttempt ? deviceAttempt.name : 'PLAYER')},<br />
                 <strong>you know the vibe.</strong>
               </h1>
 
@@ -847,12 +1110,12 @@ export default function App() {
 
               <div className="flex items-center gap-4 flex-wrap">
                 <button type="button" className="primary-btn" onClick={handleReturnHome}>
-                  RETURN TO START <ArrowUpRight size={18} />
+                  STANDINGS & HOME <ArrowUpRight size={18} />
                 </button>
                 <button
                   type="button"
                   onClick={handleShareScore}
-                  className="inline-flex items-center gap-2 border border-white/20 bg-white/5 hover:bg-white/10 text-xs font-bold uppercase tracking-wider py-3.5 px-4 text-[#fff5dd] transition-all"
+                  className="inline-flex items-center gap-2 border border-white/20 bg-white/5 hover:bg-white/10 text-xs font-bold uppercase tracking-wider py-3.5 px-4 text-[#fff5dd] transition-all cursor-pointer"
                 >
                   {copiedShare ? <Check size={16} className="text-emerald-400" /> : <Share2 size={16} />}
                   <span>{copiedShare ? 'COPIED TO CLIPBOARD' : 'SHARE SCORE'}</span>
@@ -864,23 +1127,23 @@ export default function App() {
               <div className="board-heading">
                 <span>LEADERBOARD / LIVE MULTIPLAYER</span>
                 <b>
-                  R100 PRIZE / {mainCorrectCount}/{questions.length} CORRECT
+                  R100 PRIZE / {mainCorrectCount}/{activeQuestions.length} CORRECT
                 </b>
               </div>
 
               <LeaderboardView
                 label="TOP SIGNALS / R100 PRIZE"
                 entries={entries}
-                lastEntryId={lastEntryId}
+                lastEntryId={lastEntryId || (deviceAttempt ? deviceAttempt.entryId : null)}
                 liveStatus={liveStatus}
                 recentEntryId={recentEntryId}
               />
 
               <div className="score-method">
-                <span>ONE CHANCE RULE</span>
+                <span>ONE ATTEMPT RULE</span>
                 <p>
-                  This player name ({playerName}) has logged its single entry. The top score on the global board wins
-                  the R100 prize!
+                  This device has completed its official attempt. The highest verified score on the global board wins
+                  the R100 bounty!
                 </p>
               </div>
             </div>

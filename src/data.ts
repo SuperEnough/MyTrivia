@@ -82,9 +82,9 @@ export const blitzQuestions: Question[] = [
     note: 'The calendar is watching. Choose carefully.',
     hero: ['/images/artist-a.jpg', 'Halloween night portrait'],
     choices: [
+      { id: '305', label: '305th' },
       { id: '303', label: '303rd' },
       { id: '304', label: '304th' },
-      { id: '305', label: '305th' },
     ],
     correct: '304',
     reveal: '304th day of a standard year.',
@@ -97,9 +97,9 @@ export const blitzQuestions: Question[] = [
     note: 'One last number before the clock eats your bonus.',
     hero: ['/images/chocolate-ice-cream.jpg', 'Dark Halloween texture'],
     choices: [
+      { id: '62', label: '62 days' },
       { id: '60', label: '60 days' },
       { id: '61', label: '61 days' },
-      { id: '62', label: '62 days' },
     ],
     correct: '61',
     reveal: '61 days remain after October 31st.',

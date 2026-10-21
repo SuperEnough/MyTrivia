@@ -8,6 +8,10 @@
       "destination": "/api/leaderboard"
     },
     {
+      "source": "/api/leaderboard/:match*",
+      "destination": "/api/leaderboard/:match*"
+    },
+    {
       "source": "/((?!api/.*).*)",
       "destination": "/index.html"
     }

@@ -14,6 +14,8 @@ export interface BoardEntry {
   blitzScore: number;
   timeBonus: number;
   createdAt: number;
+  deviceId?: string;
+  fingerprint?: string;
 }
 
 const app = express();
@@ -25,36 +27,6 @@ app.use(express.json());
 const DATA_DIR = path.resolve(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'leaderboard.json');
 
-const INITIAL_ENTRIES: BoardEntry[] = [
-  {
-    id: 1,
-    name: 'Sipho_K',
-    score: 870,
-    mainScore: 500,
-    blitzScore: 370,
-    timeBonus: 70,
-    createdAt: Date.now() - 3600000 * 2,
-  },
-  {
-    id: 2,
-    name: 'Tumi_M',
-    score: 790,
-    mainScore: 400,
-    blitzScore: 390,
-    timeBonus: 90,
-    createdAt: Date.now() - 3600000 * 5,
-  },
-  {
-    id: 3,
-    name: 'Vuyo_99',
-    score: 650,
-    mainScore: 400,
-    blitzScore: 250,
-    timeBonus: 50,
-    createdAt: Date.now() - 3600000 * 12,
-  },
-];
-
 function loadEntries(): BoardEntry[] {
   try {
     if (!fs.existsSync(DATA_DIR)) {
@@ -63,16 +35,16 @@ function loadEntries(): BoardEntry[] {
     if (fs.existsSync(DATA_FILE)) {
       const data = fs.readFileSync(DATA_FILE, 'utf-8');
       const parsed = JSON.parse(data);
-      if (Array.isArray(parsed) && parsed.length > 0) {
+      if (Array.isArray(parsed)) {
         return sortEntries(parsed);
       }
     }
-    // Write initial seed
-    fs.writeFileSync(DATA_FILE, JSON.stringify(INITIAL_ENTRIES, null, 2), 'utf-8');
-    return sortEntries(INITIAL_ENTRIES);
+    // Write fresh empty board
+    fs.writeFileSync(DATA_FILE, JSON.stringify([], null, 2), 'utf-8');
+    return [];
   } catch (err) {
     console.error('Failed to load leaderboard from file:', err);
-    return sortEntries(INITIAL_ENTRIES);
+    return [];
   }
 }
 
@@ -113,6 +85,22 @@ function broadcastLeaderboardUpdate(newEntry: BoardEntry) {
   }
 }
 
+function broadcastLeaderboardClear() {
+  const payload = JSON.stringify({
+    type: 'clear',
+    entries: [],
+    totalRuns: 0,
+  });
+
+  for (const client of sseClients) {
+    try {
+      client.write(`data: ${payload}\n\n`);
+    } catch {
+      sseClients.delete(client);
+    }
+  }
+}
+
 // REST API Endpoints
 app.get('/api/leaderboard', (_req, res) => {
   const sorted = sortEntries(entriesCache);
@@ -125,19 +113,33 @@ app.get('/api/leaderboard', (_req, res) => {
 
 app.get('/api/leaderboard/check', (req, res) => {
   const nameQuery = String(req.query.name || '').trim().toLowerCase();
-  if (!nameQuery) {
-    res.json({ taken: false });
-    return;
+  const deviceQuery = String(req.query.deviceId || '').trim();
+  const fingerprintQuery = String(req.query.fingerprint || '').trim();
+
+  let deviceEntry: BoardEntry | null = null;
+  if (deviceQuery) {
+    deviceEntry = entriesCache.find(e => e.deviceId && e.deviceId === deviceQuery) || null;
   }
-  const existing = entriesCache.find(e => e.name.trim().toLowerCase() === nameQuery);
+  if (!deviceEntry && fingerprintQuery && fingerprintQuery !== 'fp_generic') {
+    deviceEntry = entriesCache.find(e => e.fingerprint && e.fingerprint === fingerprintQuery) || null;
+  }
+
+  let nameEntry: BoardEntry | null = null;
+  if (nameQuery) {
+    nameEntry = entriesCache.find(e => e.name.trim().toLowerCase() === nameQuery) || null;
+  }
+
   res.json({
-    taken: !!existing,
-    existingEntry: existing || null,
+    deviceLocked: !!deviceEntry,
+    deviceEntry,
+    taken: !!nameEntry,
+    nameTaken: !!nameEntry,
+    existingEntry: nameEntry || deviceEntry,
   });
 });
 
 app.post('/api/leaderboard', (req, res) => {
-  const { name, score, mainScore, blitzScore, timeBonus } = req.body;
+  const { name, score, mainScore, blitzScore, timeBonus, deviceId, fingerprint } = req.body;
 
   const cleanedName = typeof name === 'string' ? name.trim().replace(/\s+/g, ' ').slice(0, 18) : '';
   if (!cleanedName) {
@@ -145,12 +147,34 @@ app.post('/api/leaderboard', (req, res) => {
     return;
   }
 
-  // Strict one-chance rule verification
+  // 1. Enforce strict device check (one attempt per device via deviceId or fingerprint)
+  const cleanedDeviceId = typeof deviceId === 'string' ? deviceId.trim().slice(0, 64) : '';
+  const cleanedFingerprint = typeof fingerprint === 'string' ? fingerprint.trim().slice(0, 64) : '';
+
+  let existingDeviceEntry: BoardEntry | undefined;
+  if (cleanedDeviceId) {
+    existingDeviceEntry = entriesCache.find(e => e.deviceId && e.deviceId === cleanedDeviceId);
+  }
+  if (!existingDeviceEntry && cleanedFingerprint && cleanedFingerprint !== 'fp_generic') {
+    existingDeviceEntry = entriesCache.find(e => e.fingerprint && e.fingerprint === cleanedFingerprint);
+  }
+
+  if (existingDeviceEntry) {
+    res.status(400).json({
+      error: `This device has already logged its single attempt (Player: ${existingDeviceEntry.name}, Score: ${existingDeviceEntry.score} pts). Strictly one attempt is permitted per device/player for the contest.`,
+      deviceLocked: true,
+      existingEntry: existingDeviceEntry,
+    });
+    return;
+  }
+
+  // 2. Enforce strict unique player name (one attempt per name)
   const normalizedNew = cleanedName.toLowerCase();
   const alreadyPlayed = entriesCache.some(e => e.name.trim().toLowerCase() === normalizedNew);
   if (alreadyPlayed) {
     res.status(400).json({
-      error: `${cleanedName} has already used their one chance. Try a different player name.`,
+      error: `${cleanedName} has already used their one attempt. Try a different player name.`,
+      nameTaken: true,
     });
     return;
   }
@@ -168,6 +192,8 @@ app.post('/api/leaderboard', (req, res) => {
     blitzScore: validatedBlitz,
     timeBonus: validatedTimeBonus,
     createdAt: Date.now(),
+    deviceId: cleanedDeviceId || undefined,
+    fingerprint: cleanedFingerprint || undefined,
   };
 
   entriesCache.push(newEntry);
@@ -184,6 +210,31 @@ app.post('/api/leaderboard', (req, res) => {
     rank,
     entries: entriesCache.slice(0, 50),
     totalRuns: entriesCache.length,
+  });
+});
+
+// Clear/Reset Leaderboard endpoint
+app.post('/api/leaderboard/clear', (_req, res) => {
+  entriesCache = [];
+  saveEntries([]);
+  broadcastLeaderboardClear();
+  res.json({
+    success: true,
+    message: 'Leaderboard cleared and standings reset successfully.',
+    entries: [],
+    totalRuns: 0,
+  });
+});
+
+app.delete('/api/leaderboard', (_req, res) => {
+  entriesCache = [];
+  saveEntries([]);
+  broadcastLeaderboardClear();
+  res.json({
+    success: true,
+    message: 'Leaderboard cleared and standings reset successfully.',
+    entries: [],
+    totalRuns: 0,
   });
 });
 
@@ -224,8 +275,8 @@ async function startServer() {
   const isDev = process.env.NODE_ENV !== 'production';
 
   if (isDev) {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
+    const { createServer } = await import('vite');
+    const vite = await createServer({
       server: {
         middlewareMode: true,
         hmr: process.env.DISABLE_HMR !== 'true',

@@ -29,4 +29,16 @@ export interface BoardEntry {
   blitzScore: number;
   timeBonus: number;
   createdAt?: number;
+  deviceId?: string;
+  fingerprint?: string;
+}
+
+export interface DeviceAttempt {
+  name: string;
+  score: number;
+  mainScore: number;
+  blitzScore: number;
+  timeBonus: number;
+  entryId: number;
+  timestamp: number;
 }
