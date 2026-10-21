@@ -1,0 +1,492 @@
+import './styles/main.css'
+
+type Screen = 'intro' | 'quiz' | 'blitz-intro' | 'blitz' | 'results'
+type Theme = 'car' | 'flavor' | 'music' | 'game' | 'mind' | 'blitz'
+type Choice = { id: string; label: string; src?: string; alt?: string; symbol?: string }
+type Question = {
+  theme: Theme
+  eyebrow: string
+  title: string
+  prompt: string
+  note: string
+  hero: [string, string]
+  choices: Choice[]
+  correct: string
+  reveal: string
+}
+type BoardEntry = {
+  id: number
+  name: string
+  score: number
+  mainScore: number
+  blitzScore: number
+  timeBonus: number
+}
+
+type GameState = {
+  screen: Screen
+  playerName: string
+  questionIndex: number
+  selectedMain: string | null
+  mainAnswered: boolean
+  mainScore: number
+  mainCorrectCount: number
+  blitzSelections: [string | null, string | null]
+  blitzRemaining: number
+  blitzDeadline: number
+  blitzScore: number
+  timeBonus: number
+  finalScore: number
+  entries: BoardEntry[]
+  lastEntryId: number | null
+  notice: string
+}
+
+const leaderboardKey = 'how-well-do-you-know-me.leaderboard.v2'
+const sequenceKey = 'how-well-do-you-know-me.sequence.v2'
+const legacyResetKey = 'how-well-do-you-know-me.legacy-reset.v1'
+const root = document.querySelector<HTMLDivElement>('#ui')!
+const canvas = document.querySelector<HTMLCanvasElement>('#game')!
+const image = (name: string) => `/images/${name}`
+
+const questions: Question[] = [
+  {
+    theme: 'car',
+    eyebrow: 'GARAGE FILE / 01',
+    title: 'Which ride will I own first?',
+    prompt: 'The Japanese rocket or the German track weapon?',
+    note: 'Two legends. One driveway. Pick the future key fob.',
+    hero: [image('nissan-gtr-r35.jpg'), 'Nissan GT-R R35'],
+    choices: [
+      { id: 'nissan', label: 'Nissan GT-R R35', src: image('nissan-gtr-r35.jpg'), alt: 'White Nissan GT-R R35' },
+      { id: 'porsche', label: 'Porsche 911 GT3 RS', src: image('porsche-gt3-rs.jpg'), alt: 'Porsche 911 GT3 RS' },
+    ],
+    correct: 'nissan',
+    reveal: 'Nissan GT-R R35. The first dream car in the queue.',
+  },
+  {
+    theme: 'flavor',
+    eyebrow: 'FREEZER FILE / 02',
+    title: 'Vanilla or chocolate?',
+    prompt: 'Which scoop gets the final vote?',
+    note: 'No toppings. No hedging. Just the flavor that wins every time.',
+    hero: [image('chocolate-ice-cream.jpg'), 'Chocolate ice cream'],
+    choices: [
+      { id: 'vanilla', label: 'Vanilla', src: image('vanilla-ice-cream.jpg'), alt: 'Vanilla ice cream' },
+      { id: 'chocolate', label: 'Chocolate', src: image('chocolate-ice-cream.jpg'), alt: 'Chocolate ice cream' },
+    ],
+    correct: 'chocolate',
+    reveal: 'Chocolate. Rich, decisive, and absolutely not boring.',
+  },
+  {
+    theme: 'music',
+    eyebrow: 'HEADPHONE FILE / 03',
+    title: 'J. Cole is number one. Who is number two?',
+    prompt: 'Drake or Kendrick Lamar?',
+    note: 'This ranking is personal. The group chat may not survive it.',
+    hero: [image('artist-b.jpg'), 'Artist portrait'],
+    choices: [
+      { id: 'drake', label: 'Drake', src: image('artist-a.jpg'), alt: 'Artist portrait' },
+      { id: 'kendrick', label: 'Kendrick Lamar', src: image('artist-b.jpg'), alt: 'Artist portrait' },
+    ],
+    correct: 'kendrick',
+    reveal: 'Kendrick Lamar. J. Cole at #1, Kendrick holding #2.',
+  },
+  {
+    theme: 'game',
+    eyebrow: 'CONTROLLER FILE / 04',
+    title: 'Which game owns my free time?',
+    prompt: 'Drop into Fortnite or queue up EA SPORTS FC?',
+    note: 'One is chaos from the sky. The other is a 90-minute grudge match.',
+    hero: [image('fortnite.jpg'), 'Fortnite cover art'],
+    choices: [
+      { id: 'fortnite', label: 'Fortnite', src: image('fortnite.jpg'), alt: 'Fortnite cover art' },
+      { id: 'fc', label: "EA SPORTS FC / FIFA", src: image('ea-fc-fifa.jpg'), alt: 'EA SPORTS FC FIFA football art' },
+    ],
+    correct: 'fortnite',
+    reveal: 'Fortnite. The island wins this round.',
+  },
+  {
+    theme: 'mind',
+    eyebrow: 'MINDSET FILE / 05',
+    title: 'Am I esoteric or exoteric?',
+    prompt: 'Do I keep the signal private, or put it on the main stage?',
+    note: 'Last main-game pick. Trust your read of the person behind the quiz.',
+    hero: [image('artist-a.jpg'), 'A mysterious portrait'],
+    choices: [
+      { id: 'esoteric', label: 'Esoteric', symbol: '✦' },
+      { id: 'exoteric', label: 'Exoteric', symbol: '◉' },
+    ],
+    correct: 'esoteric',
+    reveal: 'Esoteric. The deeper meaning stays in the inner circle.',
+  },
+]
+
+const blitzQuestions: Question[] = [
+  {
+    theme: 'blitz',
+    eyebrow: 'HALLOWEEN CALENDAR / A',
+    title: 'Which day of the year is Halloween?',
+    prompt: 'In a standard year, October 31st is the…',
+    note: 'The calendar is watching. Choose carefully.',
+    hero: [image('artist-a.jpg'), 'Halloween night portrait'],
+    choices: [
+      { id: '303', label: '303rd' },
+      { id: '304', label: '304th' },
+      { id: '305', label: '305th' },
+    ],
+    correct: '304',
+    reveal: '304th day of a standard year.',
+  },
+  {
+    theme: 'blitz',
+    eyebrow: 'HALLOWEEN CALENDAR / B',
+    title: 'How many days are left after Halloween?',
+    prompt: 'November plus December leaves…',
+    note: 'One last number before the clock eats your bonus.',
+    hero: [image('chocolate-ice-cream.jpg'), 'Dark Halloween texture'],
+    choices: [
+      { id: '60', label: '60 days' },
+      { id: '61', label: '61 days' },
+      { id: '62', label: '62 days' },
+    ],
+    correct: '61',
+    reveal: '61 days remain after October 31st.',
+  },
+]
+
+const state: GameState = {
+  screen: 'intro',
+  playerName: '',
+  questionIndex: 0,
+  selectedMain: null,
+  mainAnswered: false,
+  mainScore: 0,
+  mainCorrectCount: 0,
+  blitzSelections: [null, null],
+  blitzRemaining: 30,
+  blitzDeadline: 0,
+  blitzScore: 0,
+  timeBonus: 0,
+  finalScore: 0,
+  entries: loadLeaderboard(),
+  lastEntryId: null,
+  notice: '',
+}
+
+let blitzTimer: number | null = null
+
+function loadLeaderboard(): BoardEntry[] {
+  try {
+    if (localStorage.getItem(legacyResetKey) !== '1') {
+      localStorage.removeItem('how-well-do-you-know-me.leaderboard.v1')
+      localStorage.removeItem('how-well-do-you-know-me.sequence.v1')
+      localStorage.setItem(legacyResetKey, '1')
+    }
+    const parsed = JSON.parse(localStorage.getItem(leaderboardKey) ?? '[]') as BoardEntry[]
+    return Array.isArray(parsed) ? sortEntries(parsed).slice(0, 10) : []
+  } catch {
+    return []
+  }
+}
+
+function saveLeaderboard(): void {
+  const entry: BoardEntry = {
+    id: nextEntryId(),
+    name: state.playerName || 'Anonymous',
+    score: state.finalScore,
+    mainScore: state.mainScore,
+    blitzScore: state.blitzScore,
+    timeBonus: state.timeBonus,
+  }
+  state.lastEntryId = entry.id
+  state.entries = sortEntries([entry, ...state.entries]).slice(0, 10)
+  try {
+    localStorage.setItem(leaderboardKey, JSON.stringify(state.entries))
+  } catch {
+    // The game remains playable when storage is unavailable.
+  }
+}
+
+function sortEntries(entries: BoardEntry[]): BoardEntry[] {
+  return [...entries].sort((a, b) => b.score - a.score || b.timeBonus - a.timeBonus || a.id - b.id)
+}
+
+function nextEntryId(): number {
+  let last = 0
+  try { last = Number(localStorage.getItem(sequenceKey) ?? 0) || 0 } catch { /* no-op */ }
+  const next = Math.max(Date.now(), last + 1)
+  try { localStorage.setItem(sequenceKey, String(next)) } catch { /* no-op */ }
+  return next
+}
+
+function esc(value: string): string {
+  return value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[char] ?? char)
+}
+
+function render(): void {
+  document.body.dataset.theme = state.screen === 'quiz' ? questions[state.questionIndex].theme : state.screen === 'blitz' || state.screen === 'blitz-intro' ? 'blitz' : 'intro'
+  if (state.screen === 'intro') root.innerHTML = renderIntro()
+  if (state.screen === 'quiz') root.innerHTML = renderQuiz()
+  if (state.screen === 'blitz-intro') root.innerHTML = renderBlitzIntro()
+  if (state.screen === 'blitz') root.innerHTML = renderBlitz()
+  if (state.screen === 'results') root.innerHTML = renderResults()
+  bindActions()
+  if (state.screen === 'blitz') updateTimerDisplay()
+}
+
+function renderIntro(): string {
+  return `<main class="screen-shell intro-shell">
+    <div class="broadcast-line"><span class="live-dot"></span> ONE CHANCE / R100 PRIZE <span class="broadcast-rule"></span> 5 PICKS + 1 CHAOS ROUND</div>
+    <section class="intro-grid">
+      <div class="intro-copy">
+        <div class="wordmark"><span class="wordmark-dot"></span><span>I KNOW YOU</span><em>OR DO I?</em></div>
+        <p class="intro-kicker">WOULD YOU RATHER / HOW WELL DO YOU KNOW ME?</p>
+        <h1>Read the vibe.<br /><strong>Lock it in.</strong></h1>
+        <p class="intro-description">Five personal picks. Immediate reveals. Then a 30-second Halloween blitz where the calendar fights back. Everyone gets one chance; the highest score wins R100.</p>
+        <form id="start-form" class="name-form">
+          <label for="player-name">PLAYER NAME / ONE CHANCE ONLY</label>
+          <div class="name-row"><input id="player-name" maxlength="18" autocomplete="off" placeholder="Type your name" value="${esc(state.playerName)}" /><button class="primary-btn" type="submit">START QUIZ <span>↗</span></button></div>
+          ${state.notice ? `<p class="form-notice">${esc(state.notice)}</p>` : ''}
+        </form>
+        <div class="rule-row"><span>100 PTS / MAIN ANSWER</span><span>+ SPEED BONUS</span><span>ONE ATTEMPT PER NAME</span></div>
+        <div class="prize-callout">WINNER TAKES <strong>R100</strong></div>
+      </div>
+      <div class="intro-art" aria-label="Quiz preview collage">
+        <div class="art-stamp">ON AIR<br /><b>01:00</b></div>
+        <div class="art-card art-card-a"><img src="${image('nissan-gtr-r35.jpg')}" alt="Nissan GT-R R35" /><span>GARAGE / 01</span></div>
+        <div class="art-card art-card-b"><img src="${image('chocolate-ice-cream.jpg')}" alt="Chocolate ice cream" /><span>FLAVOR / 02</span></div>
+        <div class="art-card art-card-c"><img src="${image('fortnite.jpg')}" alt="Fortnite" /><span>PLAY / 04</span></div>
+        <div class="art-ghost">?</div>
+      </div>
+    </section>
+    <section class="intro-bottom"><div><span class="bottom-label">THE BRIEF</span><p>One name. One run. Highest total score wins the R100 prize.</p></div>${renderLeaderboard('CURRENT STANDINGS / R100 PRIZE')}</section>
+  </main>`
+}
+
+function renderQuiz(): string {
+  const q = questions[state.questionIndex]
+  const correct = state.selectedMain === q.correct
+  return `<main class="screen-shell question-shell theme-${q.theme}">
+    <header class="game-topbar"><div class="mini-brand"><span class="live-dot"></span> I KNOW YOU / OR DO I?</div><div class="progress-wrap"><span>MAIN GAME</span><div class="progress-track"><i style="width:${((state.questionIndex + 1) / questions.length) * 100}%"></i></div><b>${String(state.questionIndex + 1).padStart(2, '0')} / 05</b></div><div class="score-ticker"><span>SCORE</span><b>${state.mainScore}</b></div></header>
+    <section class="question-layout">
+      <div class="question-media">
+        <div class="media-meta"><span>${q.eyebrow}</span><span class="media-index">0${state.questionIndex + 1}</span></div>
+        <div class="media-frame media-slate" aria-hidden="true"><div class="slate-grid"></div><div class="slate-number">0${state.questionIndex + 1}</div><div class="media-glow"></div><div class="media-caption">PICK YOUR SIGNAL</div></div>
+        <div class="media-footer"><span>QUESTION ${state.questionIndex + 1} OF 5</span><span class="pulse-line"></span><span>INSTANT REVEAL</span></div>
+      </div>
+      <div class="question-copy">
+        <div class="section-kicker"><span class="kicker-mark">✦</span>${q.eyebrow}</div>
+        <h1>${q.title}</h1>
+        <p class="question-prompt">${q.prompt}</p>
+        <p class="question-note">${q.note}</p>
+        <div class="choice-grid choice-count-${q.choices.length}">${q.choices.map((choice, index) => renderChoice(choice, index, state.mainAnswered ? q.correct : null, state.selectedMain)).join('')}</div>
+        ${state.mainAnswered ? `<div class="answer-reveal ${correct ? 'is-correct' : 'is-wrong'}"><div class="reveal-icon">${correct ? '✓' : '×'}</div><div><strong>${correct ? 'CORRECT // +100' : 'NOT QUITE // 0 POINTS'}</strong><span>${q.reveal}</span></div></div><button class="next-btn" data-action="next-main">${state.questionIndex === questions.length - 1 ? 'ENTER THE CHAOS ROUND' : 'NEXT QUESTION'} <span>→</span></button>` : `<div class="select-hint"><span>SELECT ONE</span><span>USE 1 / 2 KEYS TOO</span></div>`}
+      </div>
+    </section>
+    <footer class="game-footer"><span>THE PERSONAL QUIZ TRANSMISSION</span><span>NO SKIPS / NO HEDGING</span></footer>
+  </main>`
+}
+
+function renderChoice(choice: Choice, index: number, correctId: string | null, selectedId: string | null): string {
+  const isSelected = selectedId === choice.id
+  const isCorrect = correctId === choice.id
+  const status = correctId ? isCorrect ? 'is-correct' : isSelected ? 'is-wrong' : 'is-dimmed' : ''
+  const visual = choice.src ? `<img src="${choice.src}" alt="${choice.alt ?? choice.label}" />` : `<span class="symbol-visual">${choice.symbol ?? '?'}</span>`
+  return `<button class="choice-card ${status} ${isSelected ? 'is-selected' : ''}" data-main-answer="${choice.id}" ${correctId ? 'disabled' : ''} aria-pressed="${isSelected}"><span class="choice-number">0${index + 1}</span><span class="choice-visual">${visual}</span><span class="choice-label">${choice.label}</span>${correctId ? `<span class="choice-state">${isCorrect ? 'ANSWER' : isSelected ? 'YOUR PICK' : ''}</span>` : '<span class="choice-arrow">↗</span>'}</button>`
+}
+
+function renderBlitzIntro(): string {
+  return `<main class="screen-shell blitz-intro-shell"><div class="blitz-grid-lines"></div><div class="broadcast-line blitz-broadcast"><span class="live-dot"></span> SPECIAL TRANSMISSION / HALLOWEEN EDITION</div><section class="blitz-intro-card"><div class="blitz-kicker">THE FINAL BLITZ</div><div class="blitz-number">30<span>SEC</span></div><h1>TIEBREAKER<br /><strong>BLITZ</strong></h1><p>My birthday is on Halloween. Two calendar facts. One ticking score multiplier. Lock both answers before the clock disappears. Highest score wins R100.</p><div class="blitz-rules"><span>304th = +150</span><span>61 days = +150</span><span>EVERY SECOND = +10</span></div><div class="prize-callout">ONE CHANCE. <strong>R100</strong> ON THE LINE.</div><button class="primary-btn blitz-start" data-action="start-blitz">START THE CHAOS <span>↗</span></button></section><div class="blitz-side-note"><span>OCT 31</span><b>THE DATE<br />IS THE CLUE.</b></div></main>`
+}
+
+function renderBlitz(): string {
+  return `<main class="screen-shell blitz-shell"><header class="game-topbar blitz-topbar"><div class="mini-brand"><span class="live-dot"></span> CHAOS ROUND / LIVE</div><div class="timer-block"><span class="timer-label">TIME LEFT</span><div class="timer-ring" id="blitz-timer"><span class="timer-number">${state.blitzRemaining}</span><small>SEC</small></div></div><div class="score-ticker"><span>BASE SCORE</span><b>${state.mainScore}</b></div></header><section class="blitz-content"><div class="blitz-headline"><div><span class="section-kicker">HALLOWEEN / CALENDAR ATTACK</span><h1>Make the date count.</h1></div><span class="blitz-tip">ANSWER BOTH<br />THEN LOCK IN</span></div><div class="blitz-question-grid">${blitzQuestions.map((q, index) => renderBlitzQuestion(q, index)).join('')}</div><div class="blitz-actions"><span>${state.blitzSelections.every(Boolean) ? 'Both answers ready.' : 'Pick one answer in each card.'}</span><button class="lock-btn" data-action="lock-blitz" ${state.blitzSelections.every(Boolean) ? '' : 'disabled'}>LOCK ANSWERS <span>↗</span></button></div></section></main>`
+}
+
+function renderBlitzQuestion(q: Question, index: number): string {
+  const selected = state.blitzSelections[index]
+  return `<article class="blitz-question-card ${selected ? 'has-selection' : ''}"><div class="blitz-card-top"><span>${q.eyebrow}</span><b>0${index + 1}</b></div><h2>${q.title}</h2><p>${q.prompt}</p><div class="blitz-options">${q.choices.map((choice, choiceIndex) => `<button class="blitz-option ${selected === choice.id ? 'is-selected' : ''}" data-blitz-question="${index}" data-blitz-answer="${choice.id}" aria-pressed="${selected === choice.id}"><span>0${choiceIndex + 1}</span>${choice.label}</button>`).join('')}</div><div class="blitz-card-foot">${q.note}</div></article>`
+}
+
+function renderResults(): string {
+  const mainAnsweredCount = state.questionIndex + 1
+  return `<main class="screen-shell results-shell"><header class="game-topbar"><div class="mini-brand"><span class="live-dot"></span> TRANSMISSION COMPLETE</div><div class="result-tag">FINAL SCORECARD / ONE CHANCE USED</div><div class="score-ticker"><span>RANKING</span><b>#${getRank()}</b></div></header><section class="results-layout"><div class="result-hero"><div class="result-orbit orbit-a"></div><div class="result-orbit orbit-b"></div><span class="result-kicker">${state.mainScore === 500 ? 'PERFECT MAIN GAME' : 'THE SIGNAL HAS SPOKEN'}</span><div class="final-score">${state.finalScore}</div><span class="points-label">TOTAL POINTS</span><div class="prize-callout">WINNER TAKES <strong>R100</strong></div><h1>${esc(state.playerName || 'PLAYER')},<br /><strong>you know the vibe.</strong></h1><div class="result-stats"><div><span>MAIN GAME</span><b>${state.mainScore}<small> / 500</small></b></div><div><span>BLITZ SCORE</span><b>${state.blitzScore}</b></div><div><span>SPEED BONUS</span><b>+${state.timeBonus}</b></div></div><button class="primary-btn" data-action="home">RETURN TO START <span>↗</span></button></div><div class="results-board"><div class="board-heading"><span>LEADERBOARD / LOCAL</span><b>R100 PRIZE / ${state.mainCorrectCount}/${mainAnsweredCount} CORRECT</b></div>${renderLeaderboard('TOP SIGNALS / R100 PRIZE')}<div class="score-method"><span>ONE CHANCE RULE</span><p>This player name has used its one attempt. The highest total score wins R100.</p></div></div></section></main>`
+}
+
+function renderLeaderboard(label: string): string {
+  const rows = state.entries.length ? state.entries.slice(0, 7).map((entry, index) => `<li class="board-row ${entry.id === state.lastEntryId ? 'is-me' : ''}"><b>${String(index + 1).padStart(2, '0')}</b><span class="board-name">${esc(entry.name)}</span><span class="board-main">${entry.mainScore}</span><em>${entry.score}</em></li>`).join('') : '<li class="board-empty">No scores yet. Put your name on the signal.</li>'
+  return `<div class="leaderboard"><div class="board-label"><span>${label}</span><span>MAIN / TOTAL</span></div><div class="board-head"><span>#</span><span>PLAYER</span><span>MAIN</span><em>TOTAL</em></div><ol>${rows}</ol></div>`
+}
+
+function getRank(): number {
+  const index = state.entries.findIndex(entry => entry.id === state.lastEntryId)
+  return index >= 0 ? index + 1 : state.entries.length + 1
+}
+
+function startGame(name: string): void {
+  const cleaned = name.trim().replace(/\s+/g, ' ').slice(0, 18)
+  if (!cleaned) {
+    state.notice = 'Drop a name first. The leaderboard needs a legend.'
+    render()
+    return
+  }
+  if (state.entries.some(entry => entry.name.toLowerCase() === cleaned.toLowerCase())) {
+    state.playerName = ''
+    state.notice = `${cleaned} has already used their one chance. Try a different player name.`
+    render()
+    return
+  }
+  state.playerName = cleaned
+  state.notice = ''
+  state.questionIndex = 0
+  state.selectedMain = null
+  state.mainAnswered = false
+  state.mainScore = 0
+  state.mainCorrectCount = 0
+  state.blitzSelections = [null, null]
+  state.blitzRemaining = 30
+  state.blitzScore = 0
+  state.timeBonus = 0
+  state.finalScore = 0
+  state.lastEntryId = null
+  state.screen = 'quiz'
+  render()
+}
+
+function chooseMain(id: string): void {
+  if (state.screen !== 'quiz' || state.mainAnswered) return
+  state.selectedMain = id
+  state.mainAnswered = true
+  if (id === questions[state.questionIndex].correct) {
+    state.mainScore += 100
+    state.mainCorrectCount += 1
+  }
+  render()
+}
+
+function nextMain(): void {
+  if (!state.mainAnswered) return
+  if (state.questionIndex === questions.length - 1) {
+    state.screen = 'blitz-intro'
+  } else {
+    state.questionIndex += 1
+    state.selectedMain = null
+    state.mainAnswered = false
+  }
+  render()
+}
+
+function startBlitz(): void {
+  clearBlitzTimer()
+  state.blitzSelections = [null, null]
+  state.blitzRemaining = 30
+  state.blitzDeadline = Date.now() + 30_000
+  state.screen = 'blitz'
+  render()
+  blitzTimer = window.setInterval(() => {
+    state.blitzRemaining = Math.max(0, Math.ceil((state.blitzDeadline - Date.now()) / 1000))
+    updateTimerDisplay()
+    if (state.blitzRemaining <= 0) finishBlitz()
+  }, 100)
+}
+
+function chooseBlitz(questionIndex: number, answer: string): void {
+  if (state.screen !== 'blitz' || state.blitzRemaining <= 0) return
+  state.blitzSelections[questionIndex] = answer
+  render()
+}
+
+function finishBlitz(): void {
+  if (state.screen !== 'blitz') return
+  clearBlitzTimer()
+  state.blitzRemaining = Math.max(0, Math.ceil((state.blitzDeadline - Date.now()) / 1000))
+  const dayPoints = state.blitzSelections[0] === '304' ? 150 : state.blitzSelections[0] === '305' ? 50 : 0
+  const leftPoints = state.blitzSelections[1] === '61' ? 150 : 0
+  state.timeBonus = state.blitzRemaining * 10
+  state.blitzScore = dayPoints + leftPoints + state.timeBonus
+  state.finalScore = state.mainScore + state.blitzScore
+  state.screen = 'results'
+  saveLeaderboard()
+  render()
+}
+
+function clearBlitzTimer(): void {
+  if (blitzTimer !== null) window.clearInterval(blitzTimer)
+  blitzTimer = null
+}
+
+function updateTimerDisplay(): void {
+  const timer = document.querySelector<HTMLElement>('#blitz-timer')
+  if (!timer) return
+  const value = timer.querySelector<HTMLElement>('.timer-number')
+  if (value) value.textContent = String(state.blitzRemaining)
+  timer.style.setProperty('--timer-progress', `${(state.blitzRemaining / 30) * 100}%`)
+  timer.dataset.urgent = state.blitzRemaining <= 10 ? 'true' : 'false'
+}
+
+function replay(): void {
+  clearBlitzTimer()
+  state.screen = 'intro'
+  state.playerName = ''
+  state.questionIndex = 0
+  state.selectedMain = null
+  state.mainAnswered = false
+  state.notice = ''
+  render()
+}
+
+function bindActions(): void {
+  root.querySelector<HTMLFormElement>('#start-form')?.addEventListener('submit', event => {
+    event.preventDefault()
+    const input = root.querySelector<HTMLInputElement>('#player-name')
+    startGame(input?.value ?? '')
+  })
+  root.querySelectorAll<HTMLButtonElement>('[data-main-answer]').forEach(button => button.addEventListener('click', () => chooseMain(button.dataset.mainAnswer ?? '')))
+  root.querySelector<HTMLButtonElement>('[data-action="next-main"]')?.addEventListener('click', nextMain)
+  root.querySelector<HTMLButtonElement>('[data-action="start-blitz"]')?.addEventListener('click', startBlitz)
+  root.querySelector<HTMLButtonElement>('[data-action="lock-blitz"]')?.addEventListener('click', finishBlitz)
+  root.querySelectorAll<HTMLButtonElement>('[data-blitz-answer]').forEach(button => button.addEventListener('click', () => chooseBlitz(Number(button.dataset.blitzQuestion ?? 0), button.dataset.blitzAnswer ?? '')))
+  root.querySelector<HTMLButtonElement>('[data-action="home"]')?.addEventListener('click', replay)
+  const input = root.querySelector<HTMLInputElement>('#player-name')
+  if (input && state.screen === 'intro') window.setTimeout(() => input.focus(), 50)
+}
+
+function setupAtmosphere(): void {
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+  const particles = Array.from({ length: 52 }, (_, index) => ({
+    x: Math.random(), y: Math.random(), radius: 1 + Math.random() * 2.8, speed: 0.0001 + Math.random() * 0.00035, drift: (Math.random() - 0.5) * 0.0002, phase: index * 0.83,
+  }))
+  const resize = () => { const dpr = Math.min(window.devicePixelRatio || 1, 2); canvas.width = Math.floor(innerWidth * dpr); canvas.height = Math.floor(innerHeight * dpr); ctx.setTransform(dpr, 0, 0, dpr, 0, 0) }
+  const draw = (time: number) => {
+    ctx.clearRect(0, 0, innerWidth, innerHeight)
+    const gradient = ctx.createRadialGradient(innerWidth * 0.72, innerHeight * 0.2, 0, innerWidth * 0.5, innerHeight * 0.5, innerWidth * 0.85)
+    gradient.addColorStop(0, 'rgba(42, 36, 89, 0.72)')
+    gradient.addColorStop(1, 'rgba(8, 9, 23, 0.98)')
+    ctx.fillStyle = gradient
+    ctx.fillRect(0, 0, innerWidth, innerHeight)
+    for (const particle of particles) {
+      const x = ((particle.x + Math.sin(time * particle.drift + particle.phase) * 0.04 + 1) % 1) * innerWidth
+      const y = ((particle.y - time * particle.speed + particle.phase * 0.00002 + 2) % 1) * innerHeight
+      ctx.beginPath(); ctx.arc(x, y, particle.radius, 0, Math.PI * 2); ctx.fillStyle = particle.phase % 2 > 1 ? 'rgba(104,247,237,.32)' : 'rgba(255,122,69,.26)'; ctx.fill()
+    }
+    window.requestAnimationFrame(draw)
+  }
+  window.addEventListener('resize', resize)
+  resize()
+  window.requestAnimationFrame(draw)
+}
+
+window.addEventListener('keydown', event => {
+  if (state.screen === 'quiz') {
+    const number = Number(event.key)
+    if (!state.mainAnswered && number >= 1 && number <= questions[state.questionIndex].choices.length) chooseMain(questions[state.questionIndex].choices[number - 1].id)
+    else if (state.mainAnswered && event.key === 'Enter') nextMain()
+  } else if (state.screen === 'blitz') {
+    if (event.key === 'Enter' && state.blitzSelections.every(Boolean)) finishBlitz()
+  } else if (state.screen === 'results' && event.key === 'Enter') replay()
+})
+
+setupAtmosphere()
+render()

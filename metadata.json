@@ -1,0 +1,6 @@
+{
+  "name": "I Know You / Or Do I? - Multiplayer Quiz",
+  "description": "A competitive personal trivia quiz and Halloween tiebreaker blitz with a real-time synchronized multiplayer leaderboard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

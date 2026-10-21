@@ -1,0 +1,253 @@
+import express from 'express';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+export interface BoardEntry {
+  id: number;
+  name: string;
+  score: number;
+  mainScore: number;
+  blitzScore: number;
+  timeBonus: number;
+  createdAt: number;
+}
+
+const app = express();
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+
+app.use(express.json());
+
+// Ensure data directory exists
+const DATA_DIR = path.resolve(__dirname, 'data');
+const DATA_FILE = path.join(DATA_DIR, 'leaderboard.json');
+
+const INITIAL_ENTRIES: BoardEntry[] = [
+  {
+    id: 1,
+    name: 'Sipho_K',
+    score: 870,
+    mainScore: 500,
+    blitzScore: 370,
+    timeBonus: 70,
+    createdAt: Date.now() - 3600000 * 2,
+  },
+  {
+    id: 2,
+    name: 'Tumi_M',
+    score: 790,
+    mainScore: 400,
+    blitzScore: 390,
+    timeBonus: 90,
+    createdAt: Date.now() - 3600000 * 5,
+  },
+  {
+    id: 3,
+    name: 'Vuyo_99',
+    score: 650,
+    mainScore: 400,
+    blitzScore: 250,
+    timeBonus: 50,
+    createdAt: Date.now() - 3600000 * 12,
+  },
+];
+
+function loadEntries(): BoardEntry[] {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    if (fs.existsSync(DATA_FILE)) {
+      const data = fs.readFileSync(DATA_FILE, 'utf-8');
+      const parsed = JSON.parse(data);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return sortEntries(parsed);
+      }
+    }
+    // Write initial seed
+    fs.writeFileSync(DATA_FILE, JSON.stringify(INITIAL_ENTRIES, null, 2), 'utf-8');
+    return sortEntries(INITIAL_ENTRIES);
+  } catch (err) {
+    console.error('Failed to load leaderboard from file:', err);
+    return sortEntries(INITIAL_ENTRIES);
+  }
+}
+
+function saveEntries(entries: BoardEntry[]): void {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(DATA_FILE, JSON.stringify(entries, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('Failed to save leaderboard to file:', err);
+  }
+}
+
+function sortEntries(entries: BoardEntry[]): BoardEntry[] {
+  return [...entries].sort((a, b) => b.score - a.score || b.timeBonus - a.timeBonus || a.id - b.id);
+}
+
+let entriesCache = loadEntries();
+
+// Active SSE client connections for real-time live synchronization
+const sseClients = new Set<express.Response>();
+
+function broadcastLeaderboardUpdate(newEntry: BoardEntry) {
+  const payload = JSON.stringify({
+    type: 'new_entry',
+    entry: newEntry,
+    entries: sortEntries(entriesCache).slice(0, 50),
+    totalRuns: entriesCache.length,
+  });
+
+  for (const client of sseClients) {
+    try {
+      client.write(`data: ${payload}\n\n`);
+    } catch {
+      sseClients.delete(client);
+    }
+  }
+}
+
+// REST API Endpoints
+app.get('/api/leaderboard', (_req, res) => {
+  const sorted = sortEntries(entriesCache);
+  res.json({
+    entries: sorted.slice(0, 50),
+    totalRuns: sorted.length,
+    highestScore: sorted.length > 0 ? sorted[0].score : 0,
+  });
+});
+
+app.get('/api/leaderboard/check', (req, res) => {
+  const nameQuery = String(req.query.name || '').trim().toLowerCase();
+  if (!nameQuery) {
+    res.json({ taken: false });
+    return;
+  }
+  const existing = entriesCache.find(e => e.name.trim().toLowerCase() === nameQuery);
+  res.json({
+    taken: !!existing,
+    existingEntry: existing || null,
+  });
+});
+
+app.post('/api/leaderboard', (req, res) => {
+  const { name, score, mainScore, blitzScore, timeBonus } = req.body;
+
+  const cleanedName = typeof name === 'string' ? name.trim().replace(/\s+/g, ' ').slice(0, 18) : '';
+  if (!cleanedName) {
+    res.status(400).json({ error: 'Player name is required.' });
+    return;
+  }
+
+  // Strict one-chance rule verification
+  const normalizedNew = cleanedName.toLowerCase();
+  const alreadyPlayed = entriesCache.some(e => e.name.trim().toLowerCase() === normalizedNew);
+  if (alreadyPlayed) {
+    res.status(400).json({
+      error: `${cleanedName} has already used their one chance. Try a different player name.`,
+    });
+    return;
+  }
+
+  const validatedScore = Math.max(0, Number(score) || 0);
+  const validatedMain = Math.max(0, Math.min(500, Number(mainScore) || 0));
+  const validatedBlitz = Math.max(0, Number(blitzScore) || 0);
+  const validatedTimeBonus = Math.max(0, Number(timeBonus) || 0);
+
+  const newEntry: BoardEntry = {
+    id: Date.now(),
+    name: cleanedName,
+    score: validatedScore,
+    mainScore: validatedMain,
+    blitzScore: validatedBlitz,
+    timeBonus: validatedTimeBonus,
+    createdAt: Date.now(),
+  };
+
+  entriesCache.push(newEntry);
+  entriesCache = sortEntries(entriesCache);
+  saveEntries(entriesCache);
+
+  broadcastLeaderboardUpdate(newEntry);
+
+  const rank = entriesCache.findIndex(e => e.id === newEntry.id) + 1;
+
+  res.status(201).json({
+    success: true,
+    entry: newEntry,
+    rank,
+    entries: entriesCache.slice(0, 50),
+    totalRuns: entriesCache.length,
+  });
+});
+
+// Real-time Server-Sent Events (SSE) Stream
+app.get('/api/leaderboard/stream', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+
+  // Send immediate initial sync
+  const initialPayload = JSON.stringify({
+    type: 'init',
+    entries: sortEntries(entriesCache).slice(0, 50),
+    totalRuns: entriesCache.length,
+  });
+  res.write(`data: ${initialPayload}\n\n`);
+
+  sseClients.add(res);
+
+  // Send periodic keep-alive ping
+  const interval = setInterval(() => {
+    try {
+      res.write(': keepalive\n\n');
+    } catch {
+      clearInterval(interval);
+      sseClients.delete(res);
+    }
+  }, 20000);
+
+  req.on('close', () => {
+    clearInterval(interval);
+    sseClients.delete(res);
+  });
+});
+
+async function startServer() {
+  const isDev = process.env.NODE_ENV !== 'production';
+
+  if (isDev) {
+    const { createServer: createViteServer } = await import('vite');
+    const vite = await createViteServer({
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR !== 'true',
+        watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.resolve(__dirname, 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (_req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`[Server] Game running at http://0.0.0.0:${PORT} (isDev: ${isDev})`);
+  });
+}
+
+startServer().catch(err => {
+  console.error('[Server] Fatal startup error:', err);
+  process.exit(1);
+});
